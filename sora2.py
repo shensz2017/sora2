@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTableWidget, QTableWidgetItem, QHeaderView, 
                              QMessageBox, QGroupBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl, QMutex
-from PyQt6.QtGui import QDesktopServices, QPalette, QColor
+from PyQt6.QtGui import QDesktopServices, QPalette, QColor, QPixmap
 
 # ===========================
 # 1. API 交互类
@@ -182,6 +182,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Sora2 Client (Auto-DL Fixed)")
         self.resize(1100, 750)
         self.tasks = []
+        self.config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
         
         self.setup_ui()
         
@@ -209,10 +210,13 @@ class MainWindow(QMainWindow):
         self.api_key_input = QLineEdit()
         self.api_key_input.setPlaceholderText("API Key")
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.save_api_key_btn = QPushButton("💾 保存 API Key")
+        self.save_api_key_btn.clicked.connect(self.save_api_config)
         api_layout.addWidget(QLabel("Base URL:"))
         api_layout.addWidget(self.base_url_input)
         api_layout.addWidget(QLabel("API Key:"))
         api_layout.addWidget(self.api_key_input)
+        api_layout.addWidget(self.save_api_key_btn)
         api_group.setLayout(api_layout)
         
         param_group = QGroupBox("生成参数")
@@ -265,21 +269,55 @@ class MainWindow(QMainWindow):
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["ID", "Time", "Status", "Progress", "Prompt", "Action"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["ID", "Time", "Status", "Progress", "Prompt", "Image", "Action"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         right_layout.addWidget(QLabel("任务列表"))
         right_layout.addWidget(self.table)
+        self.log_output = QTextEdit()
+        self.log_output.setReadOnly(True)
+        self.log_output.setFixedHeight(160)
+        right_layout.addWidget(QLabel("任务日志"))
+        right_layout.addWidget(self.log_output)
 
         main_layout.addWidget(left_panel)
         main_layout.addWidget(right_panel)
         self.update_ui_state()
+        self.load_api_config()
 
     def select_image(self):
         fname, _ = QFileDialog.getOpenFileName(self, 'Select', '.', 'Images (*.jpg *.png *.jpeg)')
         if fname:
             self.current_img_path = fname
             self.img_path_label.setText(os.path.basename(fname))
+
+    def load_api_config(self):
+        if not os.path.exists(self.config_path):
+            return
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.base_url_input.setText(data.get("base_url", self.base_url_input.text()))
+            self.api_key_input.setText(data.get("api_key", ""))
+            self.append_log("✅ 已加载本地 API 配置。")
+        except Exception as e:
+            self.append_log(f"⚠️ 加载 API 配置失败: {e}")
+
+    def save_api_config(self):
+        data = {
+            "base_url": self.base_url_input.text().strip(),
+            "api_key": self.api_key_input.text().strip()
+        }
+        try:
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.append_log("✅ API 配置已保存。")
+        except Exception as e:
+            self.append_log(f"❌ 保存 API 配置失败: {e}")
+
+    def append_log(self, message):
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_output.append(f"[{timestamp}] {message}")
 
     def update_ui_state(self):
         is_pro = "pro" in self.model_combo.currentText()
@@ -301,9 +339,12 @@ class MainWindow(QMainWindow):
         base = self.base_url_input.text()
         key = self.api_key_input.text()
         prompt = self.prompt_input.toPlainText()
-        if not base or not key or not prompt: return
+        if not base or not key or not prompt:
+            self.append_log("⚠️ 提交失败：请填写 Base URL、API Key 和提示词。")
+            return
         if not self.current_img_path:
             QMessageBox.warning(self, "错误", "请选择图片")
+            self.append_log("⚠️ 提交失败：未选择图片。")
             return
 
         self.submit_btn.setEnabled(False)
@@ -320,8 +361,9 @@ class MainWindow(QMainWindow):
         
         self.worker = SubmitWorker(api, payload, self.current_img_path)
         self.worker.finished.connect(self.on_submit_success)
-        self.worker.error.connect(lambda e: [self.submit_btn.setEnabled(True), self.submit_btn.setText("🚀 创建视频"), QMessageBox.critical(self, "Error", e)])
+        self.worker.error.connect(lambda e: [self.submit_btn.setEnabled(True), self.submit_btn.setText("🚀 创建视频"), QMessageBox.critical(self, "Error", e), self.append_log(f"❌ 请求失败：{e}")])
         self.worker.start()
+        self.append_log("🚀 已提交创建请求，等待返回...")
 
     def on_submit_success(self, data):
         self.submit_btn.setEnabled(True)
@@ -329,8 +371,10 @@ class MainWindow(QMainWindow):
         self.tasks.insert(0, {
             "task_id": data['task_id'], "prompt": data['prompt'],
             "submit_time": time.strftime("%H:%M:%S"), "status": "NOT_START",
-            "progress": "0%", "local_path": "", "downloaded": False, "url": ""
+            "progress": "0%", "local_path": "", "downloaded": False, "url": "",
+            "image_path": self.current_img_path
         })
+        self.append_log(f"✅ 请求成功，任务已创建：{data['task_id']}")
         self.update_table()
 
     def trigger_polling(self):
@@ -357,6 +401,7 @@ class MainWindow(QMainWindow):
             self.start_download(task, output_url)
         elif status == 'FAILURE':
             print(f"❌ 任务失败: {fail_reason}")
+            self.append_log(f"❌ 任务失败：{task_id} {fail_reason}")
             
         self.update_table()
 
@@ -368,6 +413,7 @@ class MainWindow(QMainWindow):
         def on_dl_finish(p):
             task['downloaded'] = True
             print(f"✅ 下载完成: {p}")
+            self.append_log(f"✅ 下载完成：{os.path.basename(p)}")
             self.update_table()
         dl.finished.connect(on_dl_finish)
         dl.start()
@@ -385,7 +431,19 @@ class MainWindow(QMainWindow):
             
             self.table.setItem(r, 3, QTableWidgetItem(t['progress']))
             self.table.setItem(r, 4, QTableWidgetItem(t['prompt'][:10]))
-            
+
+            thumb_widget = QWidget()
+            thumb_layout = QHBoxLayout(thumb_widget)
+            thumb_layout.setContentsMargins(0, 0, 0, 0)
+            thumb_label = QLabel()
+            if t.get('image_path') and os.path.exists(t['image_path']):
+                pixmap = QPixmap(t['image_path'])
+                if not pixmap.isNull():
+                    thumb_label.setPixmap(pixmap.scaled(80, 45, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            thumb_layout.addWidget(thumb_label, alignment=Qt.AlignmentFlag.AlignCenter)
+            self.table.setCellWidget(r, 5, thumb_widget)
+            self.table.setRowHeight(r, 50)
+
             w = QWidget()
             l = QHBoxLayout(w)
             l.setContentsMargins(0,0,0,0)
@@ -407,7 +465,7 @@ class MainWindow(QMainWindow):
                 l.addWidget(QLabel("❌ 失败"))
             else:
                 l.addWidget(QLabel("⏳ 进行中"))
-            self.table.setCellWidget(r, 5, w)
+            self.table.setCellWidget(r, 6, w)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
