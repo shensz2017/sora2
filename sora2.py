@@ -309,11 +309,18 @@ class MainWindow(QMainWindow):
             "api_key": self.api_key_input.text().strip()
         }
         try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
+            config_dir = os.path.dirname(self.config_path)
+            if config_dir:
+                os.makedirs(config_dir, exist_ok=True)
+            temp_path = f"{self.config_path}.tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            self.append_log("✅ API 配置已保存。")
+            os.replace(temp_path, self.config_path)
+            self.append_log(f"✅ API 配置已保存到：{self.config_path}")
+            QMessageBox.information(self, "保存成功", f"API 配置已保存到：\n{self.config_path}")
         except Exception as e:
             self.append_log(f"❌ 保存 API 配置失败: {e}")
+            QMessageBox.warning(self, "保存失败", f"无法保存配置：{e}")
 
     def append_log(self, message):
         timestamp = time.strftime("%H:%M:%S")
