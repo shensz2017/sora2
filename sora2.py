@@ -88,15 +88,35 @@ class SubmitWorker(QThread):
     finished = pyqtSignal(dict) 
     error = pyqtSignal(str)
 
-    def __init__(self, api, params, image_path, image_url):
+    def __init__(self, api, params, image_path, image_url, imgbb_key):
         super().__init__()
         self.api = api
         self.params = params
         self.image_path = image_path
         self.image_url = image_url
+        self.imgbb_key = imgbb_key
+
+    def upload_to_imgbb(self):
+        if not self.imgbb_key:
+            raise Exception("缺少 ImgBB API Key")
+        if not self.image_path or not os.path.exists(self.image_path):
+            raise Exception("缺少用于上传的图片文件")
+        url = "https://api.imgbb.com/1/upload"
+        with open(self.image_path, "rb") as f:
+            resp = requests.post(url, params={"key": self.imgbb_key}, files={"image": f}, timeout=120)
+        if resp.status_code != 200:
+            raise Exception(f"ImgBB 上传失败 ({resp.status_code}): {resp.text}")
+        data = resp.json()
+        if not data.get("success"):
+            raise Exception(f"ImgBB 上传失败: {resp.text}")
+        return data.get("data", {}).get("url") or data.get("data", {}).get("display_url")
 
     def run(self):
         try:
+            if self.api.provider == "yunwu":
+                upload_url = self.upload_to_imgbb()
+                self.params["images"] = [upload_url]
+                self.image_url = upload_url
             result = self.api.create_generation(self.params, self.image_path)
             task_id = result.get("task_id") or result.get("id")
             
@@ -197,7 +217,8 @@ class MainWindow(QMainWindow):
         self.resize(1100, 750)
         self.tasks = []
         self.settings_path = os.path.join(os.path.dirname(__file__), "settings.json")
-        self.api_key_map = self.load_settings()
+        self.settings = self.load_settings()
+        self.api_key_map = self.settings.get("api_keys", {})
         
         self.setup_ui()
         
@@ -231,12 +252,20 @@ class MainWindow(QMainWindow):
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.save_key_btn = QPushButton("💾 保存 API Key")
         self.save_key_btn.clicked.connect(self.save_api_key)
+        self.imgbb_key_input = QLineEdit()
+        self.imgbb_key_input.setPlaceholderText("ImgBB API Key")
+        self.imgbb_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.save_imgbb_btn = QPushButton("💾 保存 ImgBB Key")
+        self.save_imgbb_btn.clicked.connect(self.save_imgbb_key)
         api_layout.addWidget(QLabel("Base URL:"))
         api_layout.addWidget(self.provider_combo)
         api_layout.addWidget(self.base_url_input)
         api_layout.addWidget(QLabel("API Key:"))
         api_layout.addWidget(self.api_key_input)
         api_layout.addWidget(self.save_key_btn)
+        api_layout.addWidget(QLabel("ImgBB Key:"))
+        api_layout.addWidget(self.imgbb_key_input)
+        api_layout.addWidget(self.save_imgbb_btn)
         api_group.setLayout(api_layout)
         
         param_group = QGroupBox("生成参数")
@@ -245,8 +274,6 @@ class MainWindow(QMainWindow):
         self.img_btn.clicked.connect(self.select_image)
         self.img_path_label = QLabel("未选择")
         self.current_img_path = None
-        self.image_url_input = QLineEdit()
-        self.image_url_input.setPlaceholderText("https://... (yunwu 图片链接)")
         
         self.prompt_input = QTextEdit()
         self.prompt_input.setPlaceholderText("提示词...")
@@ -267,8 +294,6 @@ class MainWindow(QMainWindow):
         
         param_layout.addWidget(self.img_btn)
         param_layout.addWidget(self.img_path_label)
-        param_layout.addWidget(QLabel("图片链接 (yunwu):"))
-        param_layout.addWidget(self.image_url_input)
         param_layout.addWidget(QLabel("提示词:"))
         param_layout.addWidget(self.prompt_input)
         param_layout.addWidget(QLabel("模型:"))
@@ -318,8 +343,8 @@ class MainWindow(QMainWindow):
         is_pro = "pro" in self.model_combo.currentText()
         self.hd_check.setEnabled(is_pro)
         if not is_pro: self.hd_check.setChecked(False)
-        self.image_url_input.setEnabled(is_yunwu)
-        self.image_url_input.setPlaceholderText("https://... (yunwu 图片链接)" if is_yunwu else "仅 yunwu 需要图片链接")
+        self.imgbb_key_input.setEnabled(is_yunwu)
+        self.save_imgbb_btn.setEnabled(is_yunwu)
         allowed_durations = ["15s", "25s"] if is_yunwu else ["5s", "10s", "15s", "25s"]
         current = self.duration_combo.currentText()
         self.duration_combo.clear()
@@ -341,21 +366,33 @@ class MainWindow(QMainWindow):
 
     def load_settings(self):
         if not os.path.exists(self.settings_path):
-            return {}
+            return {"api_keys": {}, "imgbb_key": ""}
         try:
             with open(self.settings_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                return {"api_keys": {}, "imgbb_key": ""}
+            if "api_keys" in data:
+                return {
+                    "api_keys": data.get("api_keys", {}),
+                    "imgbb_key": data.get("imgbb_key", "")
+                }
+            return {"api_keys": data, "imgbb_key": ""}
         except Exception:
-            return {}
+            return {"api_keys": {}, "imgbb_key": ""}
 
     def save_settings(self):
+        self.settings = {
+            "api_keys": self.api_key_map,
+            "imgbb_key": self.imgbb_key_input.text().strip()
+        }
         with open(self.settings_path, "w", encoding="utf-8") as f:
-            json.dump(self.api_key_map, f, ensure_ascii=False, indent=2)
+            json.dump(self.settings, f, ensure_ascii=False, indent=2)
 
     def on_provider_changed(self, provider_url):
         self.base_url_input.setText(provider_url)
         self.api_key_input.setText(self.api_key_map.get(provider_url, ""))
+        self.imgbb_key_input.setText(self.settings.get("imgbb_key", ""))
         self.update_ui_state()
 
     def save_api_key(self):
@@ -367,16 +404,22 @@ class MainWindow(QMainWindow):
         self.save_settings()
         QMessageBox.information(self, "提示", "API Key 已保存")
 
+    def save_imgbb_key(self):
+        self.save_settings()
+        QMessageBox.information(self, "提示", "ImgBB Key 已保存")
+
     def submit_task(self):
         base = self.base_url_input.text()
         key = self.api_key_input.text()
         prompt = self.prompt_input.toPlainText()
         if not base or not key or not prompt: return
         is_yunwu = "yunwu.ai" in base
-        image_url = self.image_url_input.text().strip()
         if is_yunwu:
-            if not image_url:
-                QMessageBox.warning(self, "错误", "yunwu 需要图片链接")
+            if not self.current_img_path:
+                QMessageBox.warning(self, "错误", "请选择图片")
+                return
+            if not self.imgbb_key_input.text().strip():
+                QMessageBox.warning(self, "错误", "请先填写 ImgBB API Key")
                 return
         else:
             if not self.current_img_path:
@@ -389,7 +432,6 @@ class MainWindow(QMainWindow):
         api = SoraAPI(base, key)
         if is_yunwu:
             payload = {
-                "images": [image_url],
                 "model": self.model_combo.currentText(),
                 "orientation": self.get_orientation(),
                 "prompt": prompt,
@@ -407,7 +449,13 @@ class MainWindow(QMainWindow):
                 "seconds": self.duration_combo.currentText().replace("s", "")
             }
         
-        self.worker = SubmitWorker(api, payload, self.current_img_path, image_url)
+        self.worker = SubmitWorker(
+            api,
+            payload,
+            self.current_img_path,
+            "",
+            self.imgbb_key_input.text().strip()
+        )
         self.worker.finished.connect(self.on_submit_success)
         self.worker.error.connect(lambda e: [self.submit_btn.setEnabled(True), self.submit_btn.setText("🚀 创建视频"), QMessageBox.critical(self, "Error", e)])
         self.worker.start()
