@@ -8,8 +8,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTextEdit, QComboBox, QCheckBox, QFileDialog, 
                              QTableWidget, QTableWidgetItem, QHeaderView, 
                              QMessageBox, QGroupBox)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl, QMutex
-from PyQt6.QtGui import QDesktopServices, QPalette, QColor
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl, QMutex, QSize
+from PyQt6.QtGui import QDesktopServices, QPalette, QColor, QPixmap, QIcon
 
 # ===========================
 # 1. API 交互类
@@ -22,6 +22,7 @@ class SoraAPI:
             clean_url = clean_url[:-3]
         self.base_url = clean_url
         self.api_key = api_key
+        self.provider = "yunwu" if "yunwu.ai" in clean_url else "bltcy"
         
         self.headers_common = {
             "Authorization": f"Bearer {api_key}",
@@ -29,22 +30,28 @@ class SoraAPI:
         }
 
     def create_generation(self, payload_data, image_path):
-        url = f"{self.base_url}/v1/videos"
+        if self.provider == "yunwu":
+            url = f"{self.base_url}/v1/video/create"
+        else:
+            url = f"{self.base_url}/v1/videos"
         print(f"⏳ [API] 提交任务... URL: {url}")
         
         try:
-            data_fields = payload_data
-            files = {}
-            file_obj = None
-            
-            if image_path and os.path.exists(image_path):
-                file_obj = open(image_path, 'rb')
-                files = {'input_reference': ('reference.jpg', file_obj, 'image/jpeg')}
+            if self.provider == "yunwu":
+                resp = requests.post(url, headers=self.headers_common, json=payload_data, timeout=300)
+            else:
+                data_fields = payload_data
+                files = {}
+                file_obj = None
+                
+                if image_path and os.path.exists(image_path):
+                    file_obj = open(image_path, 'rb')
+                    files = {'input_reference': ('reference.jpg', file_obj, 'image/jpeg')}
 
-            # 5分钟超时
-            resp = requests.post(url, headers=self.headers_common, data=data_fields, files=files, timeout=300)
-            
-            if file_obj: file_obj.close()
+                # 5分钟超时
+                resp = requests.post(url, headers=self.headers_common, data=data_fields, files=files, timeout=300)
+                
+                if file_obj: file_obj.close()
             
             print(f"📡 [Create] Code: {resp.status_code}")
             
@@ -65,8 +72,12 @@ class SoraAPI:
             raise Exception(f"请求异常: {e}")
 
     def get_task_status(self, task_id):
-        url = f"{self.base_url}/v2/videos/generations/{task_id}"
-        resp = requests.get(url, headers=self.headers_common, timeout=15)
+        if self.provider == "yunwu":
+            url = f"{self.base_url}/v1/video/query"
+            resp = requests.get(url, headers=self.headers_common, params={"id": task_id}, timeout=15)
+        else:
+            url = f"{self.base_url}/v2/videos/generations/{task_id}"
+            resp = requests.get(url, headers=self.headers_common, timeout=15)
         return resp
 
 # ===========================
@@ -77,11 +88,12 @@ class SubmitWorker(QThread):
     finished = pyqtSignal(dict) 
     error = pyqtSignal(str)
 
-    def __init__(self, api, params, image_path):
+    def __init__(self, api, params, image_path, image_url):
         super().__init__()
         self.api = api
         self.params = params
         self.image_path = image_path
+        self.image_url = image_url
 
     def run(self):
         try:
@@ -95,7 +107,9 @@ class SubmitWorker(QThread):
             self.finished.emit({
                 "task_id": str(task_id),
                 "prompt": self.params.get("prompt"),
-                "status": "NOT_START"
+                "status": "NOT_START",
+                "image_path": self.image_path,
+                "image_url": self.image_url
             })
         except Exception as e:
             self.error.emit(str(e))
@@ -182,6 +196,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Sora2 Client (Auto-DL Fixed)")
         self.resize(1100, 750)
         self.tasks = []
+        self.settings_path = os.path.join(os.path.dirname(__file__), "settings.json")
+        self.api_key_map = self.load_settings()
         
         self.setup_ui()
         
@@ -205,14 +221,22 @@ class MainWindow(QMainWindow):
         
         api_group = QGroupBox("API 配置")
         api_layout = QVBoxLayout()
-        self.base_url_input = QLineEdit("https://api.bltcy.ai")
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(["https://api.bltcy.ai", "https://yunwu.ai"])
+        self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
+        self.base_url_input = QLineEdit()
+        self.base_url_input.setReadOnly(True)
         self.api_key_input = QLineEdit()
-        self.api_key_input.setPlaceholderText("API Key")
+        self.api_key_input.setPlaceholderText("API Key (按站点保存)")
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.save_key_btn = QPushButton("💾 保存 API Key")
+        self.save_key_btn.clicked.connect(self.save_api_key)
         api_layout.addWidget(QLabel("Base URL:"))
+        api_layout.addWidget(self.provider_combo)
         api_layout.addWidget(self.base_url_input)
         api_layout.addWidget(QLabel("API Key:"))
         api_layout.addWidget(self.api_key_input)
+        api_layout.addWidget(self.save_key_btn)
         api_group.setLayout(api_layout)
         
         param_group = QGroupBox("生成参数")
@@ -221,6 +245,8 @@ class MainWindow(QMainWindow):
         self.img_btn.clicked.connect(self.select_image)
         self.img_path_label = QLabel("未选择")
         self.current_img_path = None
+        self.image_url_input = QLineEdit()
+        self.image_url_input.setPlaceholderText("https://... (yunwu 图片链接)")
         
         self.prompt_input = QTextEdit()
         self.prompt_input.setPlaceholderText("提示词...")
@@ -241,6 +267,8 @@ class MainWindow(QMainWindow):
         
         param_layout.addWidget(self.img_btn)
         param_layout.addWidget(self.img_path_label)
+        param_layout.addWidget(QLabel("图片链接 (yunwu):"))
+        param_layout.addWidget(self.image_url_input)
         param_layout.addWidget(QLabel("提示词:"))
         param_layout.addWidget(self.prompt_input)
         param_layout.addWidget(QLabel("模型:"))
@@ -265,14 +293,18 @@ class MainWindow(QMainWindow):
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["ID", "Time", "Status", "Progress", "Prompt", "Action"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["Image", "ID", "Time", "Status", "Progress", "Prompt", "Action"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        for col in range(1, 7):
+            self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+        self.table.setIconSize(QSize(64, 64))
         right_layout.addWidget(QLabel("任务列表"))
         right_layout.addWidget(self.table)
 
         main_layout.addWidget(left_panel)
         main_layout.addWidget(right_panel)
+        self.on_provider_changed(self.provider_combo.currentText())
         self.update_ui_state()
 
     def select_image(self):
@@ -282,14 +314,18 @@ class MainWindow(QMainWindow):
             self.img_path_label.setText(os.path.basename(fname))
 
     def update_ui_state(self):
+        is_yunwu = "yunwu.ai" in self.base_url_input.text()
         is_pro = "pro" in self.model_combo.currentText()
         self.hd_check.setEnabled(is_pro)
         if not is_pro: self.hd_check.setChecked(False)
-        if not is_pro:
-            idx = self.duration_combo.findText("25s")
-            if idx != -1: self.duration_combo.removeItem(idx)
-        else:
-            if self.duration_combo.findText("25s") == -1: self.duration_combo.addItem("25s")
+        self.image_url_input.setEnabled(is_yunwu)
+        self.image_url_input.setPlaceholderText("https://... (yunwu 图片链接)" if is_yunwu else "仅 yunwu 需要图片链接")
+        allowed_durations = ["15s", "25s"] if is_yunwu else ["5s", "10s", "15s", "25s"]
+        current = self.duration_combo.currentText()
+        self.duration_combo.clear()
+        self.duration_combo.addItems(allowed_durations)
+        if current in allowed_durations:
+            self.duration_combo.setCurrentText(current)
 
     def get_resolution_string(self):
         is_16_9 = "16:9" in self.ratio_combo.currentText()
@@ -297,28 +333,81 @@ class MainWindow(QMainWindow):
         if is_16_9: return "1792x1024" if is_hd else "1280x720"
         else: return "1024x1792" if is_hd else "720x1280"
 
+    def get_yunwu_size(self):
+        return "large" if self.hd_check.isChecked() else "small"
+
+    def get_orientation(self):
+        return "landscape" if "16:9" in self.ratio_combo.currentText() else "portrait"
+
+    def load_settings(self):
+        if not os.path.exists(self.settings_path):
+            return {}
+        try:
+            with open(self.settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def save_settings(self):
+        with open(self.settings_path, "w", encoding="utf-8") as f:
+            json.dump(self.api_key_map, f, ensure_ascii=False, indent=2)
+
+    def on_provider_changed(self, provider_url):
+        self.base_url_input.setText(provider_url)
+        self.api_key_input.setText(self.api_key_map.get(provider_url, ""))
+        self.update_ui_state()
+
+    def save_api_key(self):
+        provider_url = self.base_url_input.text().strip()
+        key = self.api_key_input.text().strip()
+        if not provider_url:
+            return
+        self.api_key_map[provider_url] = key
+        self.save_settings()
+        QMessageBox.information(self, "提示", "API Key 已保存")
+
     def submit_task(self):
         base = self.base_url_input.text()
         key = self.api_key_input.text()
         prompt = self.prompt_input.toPlainText()
         if not base or not key or not prompt: return
-        if not self.current_img_path:
-            QMessageBox.warning(self, "错误", "请选择图片")
-            return
+        is_yunwu = "yunwu.ai" in base
+        image_url = self.image_url_input.text().strip()
+        if is_yunwu:
+            if not image_url:
+                QMessageBox.warning(self, "错误", "yunwu 需要图片链接")
+                return
+        else:
+            if not self.current_img_path:
+                QMessageBox.warning(self, "错误", "请选择图片")
+                return
 
         self.submit_btn.setEnabled(False)
         self.submit_btn.setText("提交中...")
         
         api = SoraAPI(base, key)
-        # 移除 watermark
-        payload = {
-            "model": self.model_combo.currentText(),
-            "prompt": prompt,
-            "size": self.get_resolution_string(),
-            "seconds": self.duration_combo.currentText().replace("s", "")
-        }
+        if is_yunwu:
+            payload = {
+                "images": [image_url],
+                "model": self.model_combo.currentText(),
+                "orientation": self.get_orientation(),
+                "prompt": prompt,
+                "size": self.get_yunwu_size(),
+                "duration": int(self.duration_combo.currentText().replace("s", "")),
+                "watermark": False,
+                "private": False
+            }
+        else:
+            # 移除 watermark
+            payload = {
+                "model": self.model_combo.currentText(),
+                "prompt": prompt,
+                "size": self.get_resolution_string(),
+                "seconds": self.duration_combo.currentText().replace("s", "")
+            }
         
-        self.worker = SubmitWorker(api, payload, self.current_img_path)
+        self.worker = SubmitWorker(api, payload, self.current_img_path, image_url)
         self.worker.finished.connect(self.on_submit_success)
         self.worker.error.connect(lambda e: [self.submit_btn.setEnabled(True), self.submit_btn.setText("🚀 创建视频"), QMessageBox.critical(self, "Error", e)])
         self.worker.start()
@@ -329,7 +418,8 @@ class MainWindow(QMainWindow):
         self.tasks.insert(0, {
             "task_id": data['task_id'], "prompt": data['prompt'],
             "submit_time": time.strftime("%H:%M:%S"), "status": "NOT_START",
-            "progress": "0%", "local_path": "", "downloaded": False, "url": ""
+            "progress": "0%", "local_path": "", "downloaded": False, "url": "",
+            "image_path": data.get("image_path") or "", "image_url": data.get("image_url") or ""
         })
         self.update_table()
 
@@ -375,16 +465,24 @@ class MainWindow(QMainWindow):
     def update_table(self):
         self.table.setRowCount(len(self.tasks))
         for r, t in enumerate(self.tasks):
-            self.table.setItem(r, 0, QTableWidgetItem(t['task_id']))
-            self.table.setItem(r, 1, QTableWidgetItem(t['submit_time']))
+            thumb_item = QTableWidgetItem()
+            image_path = t.get("image_path") or ""
+            if image_path and os.path.exists(image_path):
+                pixmap = QPixmap(image_path)
+                if not pixmap.isNull():
+                    pixmap = pixmap.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                    thumb_item.setIcon(QIcon(pixmap))
+            self.table.setItem(r, 0, thumb_item)
+            self.table.setItem(r, 1, QTableWidgetItem(t['task_id']))
+            self.table.setItem(r, 2, QTableWidgetItem(t['submit_time']))
             
             st = QTableWidgetItem(t['status'])
             if t['status']=='SUCCESS': st.setForeground(Qt.GlobalColor.green)
             elif t['status']=='FAILURE': st.setForeground(Qt.GlobalColor.red)
-            self.table.setItem(r, 2, st)
+            self.table.setItem(r, 3, st)
             
-            self.table.setItem(r, 3, QTableWidgetItem(t['progress']))
-            self.table.setItem(r, 4, QTableWidgetItem(t['prompt'][:10]))
+            self.table.setItem(r, 4, QTableWidgetItem(t['progress']))
+            self.table.setItem(r, 5, QTableWidgetItem(t['prompt'][:10]))
             
             w = QWidget()
             l = QHBoxLayout(w)
@@ -407,7 +505,8 @@ class MainWindow(QMainWindow):
                 l.addWidget(QLabel("❌ 失败"))
             else:
                 l.addWidget(QLabel("⏳ 进行中"))
-            self.table.setCellWidget(r, 5, w)
+            self.table.setCellWidget(r, 6, w)
+            self.table.setRowHeight(r, 70)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
