@@ -182,7 +182,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Sora2 Client (Auto-DL Fixed)")
         self.resize(1100, 750)
         self.tasks = []
-        self.config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        app_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+        self.config_path = os.path.join(app_dir, "config.json")
         
         self.setup_ui()
         
