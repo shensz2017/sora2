@@ -3,10 +3,10 @@ import os
 import time
 import requests
 import json
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
-                             QTextEdit, QComboBox, QCheckBox, QFileDialog, 
-                             QTableWidget, QTableWidgetItem, QHeaderView, 
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                             QTextEdit, QPlainTextEdit, QComboBox, QCheckBox, QFileDialog,
+                             QTableWidget, QTableWidgetItem, QHeaderView,
                              QMessageBox, QGroupBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl, QMutex
 from PyQt6.QtGui import QDesktopServices, QPalette, QColor, QPixmap
@@ -184,6 +184,7 @@ class MainWindow(QMainWindow):
         self.tasks = []
         app_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
         self.config_path = os.path.join(app_dir, "config.json")
+        self.thumbnail_cache = {}
         
         self.setup_ui()
         
@@ -275,7 +276,7 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         right_layout.addWidget(QLabel("任务列表"))
         right_layout.addWidget(self.table)
-        self.log_output = QTextEdit()
+        self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setFixedHeight(160)
         right_layout.addWidget(QLabel("任务日志"))
@@ -325,7 +326,7 @@ class MainWindow(QMainWindow):
 
     def append_log(self, message):
         timestamp = time.strftime("%H:%M:%S")
-        self.log_output.append(f"[{timestamp}] {message}")
+        self.log_output.appendPlainText(f"[{timestamp}] {message}")
 
     def update_ui_state(self):
         is_pro = "pro" in self.model_combo.currentText()
@@ -427,6 +428,7 @@ class MainWindow(QMainWindow):
         dl.start()
 
     def update_table(self):
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(self.tasks))
         for r, t in enumerate(self.tasks):
             self.table.setItem(r, 0, QTableWidgetItem(t['task_id']))
@@ -440,16 +442,18 @@ class MainWindow(QMainWindow):
             self.table.setItem(r, 3, QTableWidgetItem(t['progress']))
             self.table.setItem(r, 4, QTableWidgetItem(t['prompt'][:10]))
 
-            thumb_widget = QWidget()
-            thumb_layout = QHBoxLayout(thumb_widget)
-            thumb_layout.setContentsMargins(0, 0, 0, 0)
-            thumb_label = QLabel()
-            if t.get('image_path') and os.path.exists(t['image_path']):
-                pixmap = QPixmap(t['image_path'])
-                if not pixmap.isNull():
-                    thumb_label.setPixmap(pixmap.scaled(80, 45, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            thumb_layout.addWidget(thumb_label, alignment=Qt.AlignmentFlag.AlignCenter)
-            self.table.setCellWidget(r, 5, thumb_widget)
+            thumb_item = QTableWidgetItem()
+            image_path = t.get('image_path')
+            if image_path and os.path.exists(image_path):
+                cached = self.thumbnail_cache.get(image_path)
+                if cached is None:
+                    pixmap = QPixmap(image_path)
+                    if not pixmap.isNull():
+                        cached = pixmap.scaled(80, 45, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                        self.thumbnail_cache[image_path] = cached
+                if cached is not None:
+                    thumb_item.setData(Qt.ItemDataRole.DecorationRole, cached)
+            self.table.setItem(r, 5, thumb_item)
             self.table.setRowHeight(r, 50)
 
             w = QWidget()
@@ -474,6 +478,7 @@ class MainWindow(QMainWindow):
             else:
                 l.addWidget(QLabel("⏳ 进行中"))
             self.table.setCellWidget(r, 6, w)
+        self.table.setUpdatesEnabled(True)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
