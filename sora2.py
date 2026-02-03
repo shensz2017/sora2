@@ -94,8 +94,13 @@ class SoraAPI:
             raise Exception(f"请求异常: {e}")
 
     def get_task_status(self, task_id):
-        url = f"{self.base_url}/v2/videos/generations/{task_id}"
-        resp = requests.get(url, headers=self.headers_common, params={"key": self.api_key}, timeout=15)
+        url = f"{self.base_url}/detail"
+        resp = requests.get(
+            url,
+            headers=self.headers_common,
+            params={"key": self.api_key, "id": task_id},
+            timeout=15
+        )
         return resp
 
 # ===========================
@@ -169,17 +174,30 @@ class StatusPollingWorker(QThread):
                 resp = self.api.get_task_status(tid)
                 if resp.status_code == 200:
                     data = resp.json()
-                    status = data.get('status', 'UNKNOWN')
-                    progress = data.get('progress', '0%')
-                    fail_reason = data.get('fail_reason', '')
+                    payload = data.get('data', {}) if isinstance(data, dict) else {}
+                    status_code = payload.get('status')
+                    status_map = {
+                        0: "NOT_START",
+                        1: "SUCCESS",
+                        2: "FAILURE",
+                        3: "IN_PROGRESS"
+                    }
+                    status = status_map.get(status_code, "UNKNOWN")
+                    progress = "100%" if status == "SUCCESS" else "0%"
+                    fail_reason = payload.get('fail_reason', '')
                     
                     # === 🔍 核心修复：全方位寻找视频 URL ===
                     output_url = ""
                     
                     # 1. 先找 data 里面的字段 (video_url / output / url)
-                    raw_data = data.get('data')
+                    raw_data = payload
                     if isinstance(raw_data, dict):
-                        output_url = raw_data.get('video_url') or raw_data.get('output') or raw_data.get('url')
+                        output_url = (
+                            raw_data.get('remote_url')
+                            or raw_data.get('video_url')
+                            or raw_data.get('output')
+                            or raw_data.get('url')
+                        )
                         # 如果是列表，取第一个
                         if isinstance(output_url, list) and len(output_url) > 0:
                             output_url = output_url[0]
