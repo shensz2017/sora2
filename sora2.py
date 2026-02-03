@@ -5,7 +5,7 @@ import requests
 import json
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                             QTextEdit, QPlainTextEdit, QComboBox, QCheckBox, QFileDialog,
+                             QTextEdit, QPlainTextEdit, QComboBox, QFileDialog,
                              QTableWidget, QTableWidgetItem, QHeaderView,
                              QMessageBox, QGroupBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl, QMutex
@@ -16,35 +16,65 @@ from PyQt6.QtGui import QDesktopServices, QPalette, QColor, QPixmap
 # ===========================
 
 class SoraAPI:
-    def __init__(self, base_url, api_key):
+    def __init__(self, base_url, api_key, imgbb_key):
         clean_url = base_url.strip().rstrip('/')
-        if clean_url.endswith('/v1') or clean_url.endswith('/v2'):
-            clean_url = clean_url[:-3]
         self.base_url = clean_url
         self.api_key = api_key
-        
+        self.imgbb_key = imgbb_key
+
         self.headers_common = {
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": api_key,
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
+    def upload_image_to_imgbb(self, image_path):
+        if not self.imgbb_key:
+            raise Exception("未配置 ImgBB API Key，无法上传图片。")
+        if not image_path or not os.path.exists(image_path):
+            raise Exception("图片路径无效，无法上传。")
+
+        url = "https://api.imgbb.com/1/upload"
+        print("⏳ [ImgBB] 上传图片...")
+        file_obj = None
+        try:
+            file_obj = open(image_path, "rb")
+            resp = requests.post(
+                url,
+                params={"key": self.imgbb_key},
+                files={"image": file_obj},
+                timeout=120
+            )
+            if resp.status_code != 200:
+                raise Exception(f"ImgBB 上传失败 ({resp.status_code}): {resp.text}")
+            payload = resp.json()
+            if not payload.get("success"):
+                raise Exception(f"ImgBB 上传失败: {payload}")
+            image_url = payload.get("data", {}).get("url")
+            if not image_url:
+                raise Exception(f"ImgBB 返回缺少图片 URL: {payload}")
+            return image_url
+        finally:
+            if file_obj:
+                file_obj.close()
+
     def create_generation(self, payload_data, image_path):
-        url = f"{self.base_url}/v1/videos"
+        url = f"{self.base_url}/submit"
         print(f"⏳ [API] 提交任务... URL: {url}")
         
         try:
-            data_fields = payload_data
-            files = {}
-            file_obj = None
-            
-            if image_path and os.path.exists(image_path):
-                file_obj = open(image_path, 'rb')
-                files = {'input_reference': ('reference.jpg', file_obj, 'image/jpeg')}
+            data_fields = dict(payload_data)
+            if image_path:
+                image_url = self.upload_image_to_imgbb(image_path)
+                data_fields["url"] = image_url
 
             # 5分钟超时
-            resp = requests.post(url, headers=self.headers_common, data=data_fields, files=files, timeout=300)
-            
-            if file_obj: file_obj.close()
+            resp = requests.post(
+                url,
+                headers=self.headers_common,
+                params={"key": self.api_key},
+                data=data_fields,
+                timeout=300
+            )
             
             print(f"📡 [Create] Code: {resp.status_code}")
             
@@ -61,12 +91,11 @@ class SoraAPI:
         except requests.exceptions.Timeout:
             raise Exception("❌ 请求超时 (已等待5分钟)！请稍后在后台查看。")
         except Exception as e:
-            if 'file_obj' in locals() and file_obj: file_obj.close()
             raise Exception(f"请求异常: {e}")
 
     def get_task_status(self, task_id):
         url = f"{self.base_url}/v2/videos/generations/{task_id}"
-        resp = requests.get(url, headers=self.headers_common, timeout=15)
+        resp = requests.get(url, headers=self.headers_common, params={"key": self.api_key}, timeout=15)
         return resp
 
 # ===========================
@@ -87,6 +116,8 @@ class SubmitWorker(QThread):
         try:
             result = self.api.create_generation(self.params, self.image_path)
             task_id = result.get("task_id") or result.get("id")
+            if not task_id and isinstance(result, dict):
+                task_id = result.get("data", {}).get("id")
             
             if not task_id:
                 if isinstance(result, str): task_id = result
@@ -208,16 +239,21 @@ class MainWindow(QMainWindow):
         
         api_group = QGroupBox("API 配置")
         api_layout = QVBoxLayout()
-        self.base_url_input = QLineEdit("https://api.bltcy.ai")
+        self.base_url_input = QLineEdit("https://api.wuyinkeji.com/api/sora2-new")
         self.api_key_input = QLineEdit()
         self.api_key_input.setPlaceholderText("API Key")
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.imgbb_key_input = QLineEdit()
+        self.imgbb_key_input.setPlaceholderText("ImgBB API Key")
+        self.imgbb_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.save_api_key_btn = QPushButton("💾 保存 API Key")
         self.save_api_key_btn.clicked.connect(self.save_api_config)
         api_layout.addWidget(QLabel("Base URL:"))
         api_layout.addWidget(self.base_url_input)
         api_layout.addWidget(QLabel("API Key:"))
         api_layout.addWidget(self.api_key_input)
+        api_layout.addWidget(QLabel("ImgBB Key:"))
+        api_layout.addWidget(self.imgbb_key_input)
         api_layout.addWidget(self.save_api_key_btn)
         api_group.setLayout(api_layout)
         
@@ -232,30 +268,25 @@ class MainWindow(QMainWindow):
         self.prompt_input.setPlaceholderText("提示词...")
         self.prompt_input.setFixedHeight(80)
         
-        self.model_combo = QComboBox()
-        self.model_combo.addItems(["sora-2", "sora-2-pro"])
-        self.model_combo.currentTextChanged.connect(self.update_ui_state)
-        
         self.ratio_combo = QComboBox()
-        self.ratio_combo.addItems(["16:9 (横屏)", "9:16 (竖屏)"])
+        self.ratio_combo.addItems(["16:9", "9:16"])
         
         self.duration_combo = QComboBox()
-        self.duration_combo.addItems(["5s", "10s", "15s", "25s"])
-        
-        self.hd_check = QCheckBox("HD 高清 (仅Pro)")
-        self.hd_check.toggled.connect(self.update_ui_state)
+        self.duration_combo.addItems(["10s", "15s"])
+
+        self.size_combo = QComboBox()
+        self.size_combo.addItems(["small", "large"])
         
         param_layout.addWidget(self.img_btn)
         param_layout.addWidget(self.img_path_label)
         param_layout.addWidget(QLabel("提示词:"))
         param_layout.addWidget(self.prompt_input)
-        param_layout.addWidget(QLabel("模型:"))
-        param_layout.addWidget(self.model_combo)
         param_layout.addWidget(QLabel("分辨率:"))
         param_layout.addWidget(self.ratio_combo)
         param_layout.addWidget(QLabel("时长:"))
         param_layout.addWidget(self.duration_combo)
-        param_layout.addWidget(self.hd_check)
+        param_layout.addWidget(QLabel("清晰度:"))
+        param_layout.addWidget(self.size_combo)
         param_group.setLayout(param_layout)
         
         self.submit_btn = QPushButton("🚀 创建视频")
@@ -284,7 +315,6 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(left_panel)
         main_layout.addWidget(right_panel)
-        self.update_ui_state()
         self.load_api_config()
 
     def select_image(self):
@@ -301,6 +331,7 @@ class MainWindow(QMainWindow):
                 data = json.load(f)
             self.base_url_input.setText(data.get("base_url", self.base_url_input.text()))
             self.api_key_input.setText(data.get("api_key", ""))
+            self.imgbb_key_input.setText(data.get("imgbb_key", ""))
             self.append_log("✅ 已加载本地 API 配置。")
         except Exception as e:
             self.append_log(f"⚠️ 加载 API 配置失败: {e}")
@@ -308,7 +339,8 @@ class MainWindow(QMainWindow):
     def save_api_config(self):
         data = {
             "base_url": self.base_url_input.text().strip(),
-            "api_key": self.api_key_input.text().strip()
+            "api_key": self.api_key_input.text().strip(),
+            "imgbb_key": self.imgbb_key_input.text().strip()
         }
         try:
             config_dir = os.path.dirname(self.config_path)
@@ -328,44 +360,31 @@ class MainWindow(QMainWindow):
         timestamp = time.strftime("%H:%M:%S")
         self.log_output.appendPlainText(f"[{timestamp}] {message}")
 
-    def update_ui_state(self):
-        is_pro = "pro" in self.model_combo.currentText()
-        self.hd_check.setEnabled(is_pro)
-        if not is_pro: self.hd_check.setChecked(False)
-        if not is_pro:
-            idx = self.duration_combo.findText("25s")
-            if idx != -1: self.duration_combo.removeItem(idx)
-        else:
-            if self.duration_combo.findText("25s") == -1: self.duration_combo.addItem("25s")
-
-    def get_resolution_string(self):
-        is_16_9 = "16:9" in self.ratio_combo.currentText()
-        is_hd = self.hd_check.isChecked()
-        if is_16_9: return "1792x1024" if is_hd else "1280x720"
-        else: return "1024x1792" if is_hd else "720x1280"
+    def get_aspect_ratio(self):
+        return "16:9" if "16:9" in self.ratio_combo.currentText() else "9:16"
 
     def submit_task(self):
         base = self.base_url_input.text()
         key = self.api_key_input.text()
+        imgbb_key = self.imgbb_key_input.text()
         prompt = self.prompt_input.toPlainText()
         if not base or not key or not prompt:
             self.append_log("⚠️ 提交失败：请填写 Base URL、API Key 和提示词。")
             return
-        if not self.current_img_path:
-            QMessageBox.warning(self, "错误", "请选择图片")
-            self.append_log("⚠️ 提交失败：未选择图片。")
+        if self.current_img_path and not imgbb_key:
+            QMessageBox.warning(self, "错误", "请填写 ImgBB API Key")
+            self.append_log("⚠️ 提交失败：缺少 ImgBB API Key。")
             return
 
         self.submit_btn.setEnabled(False)
         self.submit_btn.setText("提交中...")
         
-        api = SoraAPI(base, key)
-        # 移除 watermark
+        api = SoraAPI(base, key, imgbb_key)
         payload = {
-            "model": self.model_combo.currentText(),
             "prompt": prompt,
-            "size": self.get_resolution_string(),
-            "seconds": self.duration_combo.currentText().replace("s", "")
+            "aspectRatio": self.get_aspect_ratio(),
+            "duration": self.duration_combo.currentText().replace("s", ""),
+            "size": self.size_combo.currentText()
         }
         
         self.worker = SubmitWorker(api, payload, self.current_img_path)
@@ -392,7 +411,11 @@ class MainWindow(QMainWindow):
         if not pending_ids: return
         if self.polling_worker and self.polling_worker.isRunning(): return 
 
-        api = SoraAPI(self.base_url_input.text(), self.api_key_input.text())
+        api = SoraAPI(
+            self.base_url_input.text(),
+            self.api_key_input.text(),
+            self.imgbb_key_input.text()
+        )
         self.polling_worker = StatusPollingWorker(api, pending_ids)
         self.polling_worker.task_update.connect(self.on_polling_update)
         self.polling_worker.start()
