@@ -174,8 +174,18 @@ class StatusPollingWorker(QThread):
                 resp = self.api.get_task_status(tid)
                 if resp.status_code == 200:
                     data = resp.json()
+                    if isinstance(data, dict) and data.get("code") not in (None, 200):
+                        status = "UNKNOWN"
+                        progress = "0%"
+                        fail_reason = data.get("msg", "")
+                        output_url = ""
+                        self.task_update.emit(tid, status, progress, output_url, fail_reason)
+                        continue
+
                     payload = data.get('data', {}) if isinstance(data, dict) else {}
                     status_code = payload.get('status')
+                    if isinstance(status_code, str) and status_code.isdigit():
+                        status_code = int(status_code)
                     status_map = {
                         0: "NOT_START",
                         1: "SUCCESS",
