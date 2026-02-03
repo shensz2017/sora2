@@ -19,6 +19,10 @@ class SoraAPI:
     def __init__(self, base_url, api_key, imgbb_key):
         clean_url = base_url.strip().rstrip('/')
         self.base_url = clean_url
+        if "/sora2-new" in clean_url:
+            self.detail_base_url = clean_url.replace("/sora2-new", "/sora2")
+        else:
+            self.detail_base_url = clean_url
         self.api_key = api_key
         self.imgbb_key = imgbb_key
 
@@ -94,7 +98,7 @@ class SoraAPI:
             raise Exception(f"请求异常: {e}")
 
     def get_task_status(self, task_id):
-        url = f"{self.base_url}/detail"
+        url = f"{self.detail_base_url}/detail"
         resp = requests.get(
             url,
             headers=self.headers_common,
